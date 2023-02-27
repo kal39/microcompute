@@ -4,17 +4,40 @@ UseTab: Always
 IndentWidth: 4
 TabWidth: 4
 IndentCaseLabels: true
-AllowShortBlocksOnASingleLine: Never
-AllowShortFunctionsOnASingleLine: None
-AllowShortIfStatementsOnASingleLine: AllIfsAndElse
-AllowShortLoopsOnASingleLine: true
-AllowShortCaseLabelsOnASingleLine: true
-AllowShortEnumsOnASingleLine: false
-AlignAfterOpenBracket: BlockIndent
-BreakBeforeTernaryOperators: false
+
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
+
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+
 BinPackArguments: false
 BinPackParameters: false
-AlignOperands: AlignAfterOperator
+
 BreakBeforeBinaryOperators: All
+BreakBeforeTernaryOperators: true
+
+PointerAlignment: Left
+ReferenceAlignment: Right
+
+AlignAfterOpenBracket: BlockIndent
+AlignOperands: AlignAfterOperator
+
+BreakBeforeTernaryOperators: false
+BreakBeforeBinaryOperators: All
+BreakBeforeTernaryOperators: true
+
+
+
+PenaltyBreakAssignment: 0
+PenaltyBreakBeforeFirstCallParameter: 0
+PenaltyBreakComment: 0
+PenaltyBreakOpenParenthesis: 0
+PenaltyBreakString: 0
+PenaltyExcessCharacter: 100000
+PenaltyIndentedWhitespace: 0
+PenaltyReturnTypeOnItsOwnLine: 100000

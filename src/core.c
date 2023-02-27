@@ -1,195 +1,120 @@
-#include "_microcompute.h"
+#include "microcompute_internal.h"
 
-struct mc_State {
-	int rendererFd;
-	struct gbm_device *device;
-	EGLDisplay display;
-	EGLContext context;
-	void (*debug_cb)(mc_DebugLevel, char *, void *);
-	void *callbackArg;
-};
+mcResult mc_state_create(mcStateH* stateRef, mcDeviceSelector device_selector) {
+	mcState state;
 
-static struct mc_State state;
-
-static void gl_debug_cb(
-	GLenum source,
-	GLenum type,
-	GLuint id,
-	GLenum severity,
-	GLsizei length,
-	const GLchar *msg,
-	const void *data
-) {
-	if (state.debug_cb == NULL) return;
-
-	char *sourceStr = (char *[]){
-		"API",
-		"WINDOW",
-		"SHADER",
-		"THIRD PARTY",
-		"APPLICATION",
-		"UNKNOWN",
-	}[source - GL_DEBUG_SOURCE_API];
-
-	char *typeStr = (char *[]){
-		"error",
-		"deprecated",
-		"undefined",
-		"portability",
-		"performance",
-		"other",
-		"marker",
-	}[type - GL_DEBUG_TYPE_ERROR];
-
-	mc_DebugLevel level;
-	switch (severity) {
-		case GL_DEBUG_SEVERITY_HIGH: level = mc_DebugLevel_HIGH; break;
-		case GL_DEBUG_SEVERITY_MEDIUM: level = mc_DebugLevel_MEDIUM; break;
-		case GL_DEBUG_SEVERITY_LOW: level = mc_DebugLevel_LOW; break;
-		case GL_DEBUG_SEVERITY_NOTIFICATION: level = mc_DebugLevel_INFO; break;
-		default: return;
-	}
-
-	int len = snprintf(NULL, 0, "GL: %s (%s): %s", sourceStr, typeStr, msg) + 1;
-	char *buff = malloc(len);
-	snprintf(buff, len, "GL: %s (%s): %s", sourceStr, typeStr, msg);
-
-	state.debug_cb(level, buff, state.callbackArg);
-	free(buff);
-}
-
-void debug_msg_fn(const char *function, int level, char *format, ...) {
-	if (state.debug_cb == NULL) return;
-
-	va_list args;
-	va_start(args, format);
-	int len = vsnprintf(NULL, 0, format, args) + 1;
-	va_end(args);
-	char *message = malloc(len);
-	va_start(args, format);
-	vsnprintf(message, len, format, args);
-	va_end(args);
-
-	len = snprintf(NULL, 0, "%s(): %s", function, message) + 1;
-	char *formattedMessage = malloc(len);
-	snprintf(formattedMessage, len, "%s(): %s", function, message);
-
-	state.debug_cb(level, formattedMessage, state.callbackArg);
-	free(message);
-	free(formattedMessage);
-}
-
-bool mc_start(char *renderDevice) {
-	state.rendererFd = open(renderDevice, O_RDWR);
-	if (state.rendererFd <= 0) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to open %s", renderDevice);
-		mc_stop();
-		return false;
-	}
-
-	state.device = gbm_create_device(state.rendererFd);
-	if (state.device == NULL) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to create gbm device");
-		mc_stop();
-		return false;
-	}
-
-	state.display = eglGetDisplay(state.device);
-	if (state.display == NULL) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to get egl display");
-		mc_stop();
-		return false;
-	}
-
-	EGLint major, minor;
-	if (!eglInitialize(state.display, &major, &minor)) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to initialize egl");
-		mc_stop();
-		return false;
+	VkApplicationInfo appInfo = (VkApplicationInfo){
+		.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+		.pApplicationName = "Vulkan test",
+		.applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+		.engineVersion = VK_MAKE_VERSION(1, 0, 0),
+		.apiVersion = VK_API_VERSION_1_0,
 	};
 
-	if (major < 1 || (major == 1 && minor < 5)) {
-		debug_msg(
-			mc_DebugLevel_HIGH,
-			"egl version: %d.%d too low (min req: 1.5)",
-			major,
-			minor
+	VkInstanceCreateInfo iCreateInfo = (VkInstanceCreateInfo){
+		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+		.pApplicationInfo = &appInfo,
+		.enabledLayerCount = 1,
+		.ppEnabledLayerNames = (const char *[]){
+			"VK_LAYER_KHRONOS_validation",
+		},
+	};
+
+	if (vkCreateInstance(&iCreateInfo, NULL, &state.instance) != VK_SUCCESS)
+		return ERROR("failed to create vulkan state");
+
+	uint32_t deviceCount;
+	vkEnumeratePhysicalDevices(state.instance, &deviceCount, NULL);
+	VkPhysicalDevice physicalDevices[deviceCount];
+	VkPhysicalDeviceProperties physicalDeviceProps[deviceCount];
+	mcDevice devices[deviceCount];
+	vkEnumeratePhysicalDevices(state.instance, &deviceCount, physicalDevices);
+
+	if (deviceCount == 0) return ERROR("could not find any vulkan devices");
+
+	for (uint32_t i = 0; i < deviceCount; i++) {
+		vkGetPhysicalDeviceProperties(
+			physicalDevices[i],
+			&physicalDeviceProps[i]
 		);
-		mc_stop();
-		return false;
+		devices[i] = (mcDevice) {
+			.name = physicalDeviceProps[i].deviceName,
+			.type = (char *[]){
+				"other",
+				"integrated gpu",
+				"discrete gpu",
+				"virtual gpu",
+				"cpu",
+			}[physicalDeviceProps[i].deviceType],
+			.memorySize
+			= physicalDeviceProps[i].limits.maxComputeSharedMemorySize,
+		};
 	}
 
-	if (!eglBindAPI(EGL_OPENGL_API)) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to bind opengl api to egl");
-		mc_stop();
-		return false;
+	uint32_t deviceChoice = device_selector(deviceCount, devices);
+
+	if (deviceChoice >= deviceCount)
+		return ERROR("`deviceChoice` is larger than total device count");
+
+	state.physicalDevice = physicalDevices[deviceChoice];
+
+	uint32_t queueCount;
+	vkGetPhysicalDeviceQueueFamilyProperties(
+		state.physicalDevice,
+		&queueCount,
+		NULL
+	);
+	VkQueueFamilyProperties queues[queueCount];
+	vkGetPhysicalDeviceQueueFamilyProperties(
+		state.physicalDevice,
+		&queueCount,
+		queues
+	);
+
+	state.queueIndex = UINT32_MAX;
+	for (uint32_t i = 0; i < queueCount; i++) {
+		if (queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) state.queueIndex = i;
 	}
 
-	static const EGLint cfgAttrib[] = {
-		EGL_RENDERABLE_TYPE,
-		EGL_OPENGL_BIT,
-		EGL_NONE,
+	if (state.queueIndex == UINT32_MAX)
+		return ERROR("failed to find compute queue that supports compute");
+
+	VkDeviceQueueCreateInfo queueCreateInfo = (VkDeviceQueueCreateInfo){
+		.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+		.queueFamilyIndex = state.queueIndex,
+		.queueCount = 1,
+		.pQueuePriorities = &(float){1.0},
 	};
 
-	EGLConfig eglCfg;
-	EGLint cfgCount;
-
-	if (!eglChooseConfig(state.display, cfgAttrib, &eglCfg, 1, &cfgCount)) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to choose egl config");
-		mc_stop();
-		return false;
+	VkDeviceCreateInfo devCreateInfo = (VkDeviceCreateInfo){
+		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+		.queueCreateInfoCount = 1,
+		.pQueueCreateInfos = &queueCreateInfo,
+		.pEnabledFeatures = &(VkPhysicalDeviceFeatures){},
 	};
 
-	static const EGLint ctxAttrib[] = {
-		EGL_CONTEXT_MAJOR_VERSION,
-		4,
-		EGL_CONTEXT_MINOR_VERSION,
-		6,
-		EGL_CONTEXT_OPENGL_DEBUG,
-		EGL_TRUE,
-		EGL_NONE,
-	};
-
-	EGLContext ctx
-		= eglCreateContext(state.display, eglCfg, EGL_NO_CONTEXT, ctxAttrib);
-
-	if (ctx == EGL_NO_CONTEXT) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to create egl context");
-		mc_stop();
-		return false;
-	};
-
-	if (!eglMakeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to make egl context current");
-		mc_stop();
-		return false;
-	};
-
-	if (!glewInit()) {
-		debug_msg(mc_DebugLevel_HIGH, "failed to initialize GLEW");
-		mc_stop();
-		return false;
+	if (vkCreateDevice(
+			state.physicalDevice,
+			&devCreateInfo,
+			NULL,
+			&state.device
+		)
+		!= VK_SUCCESS) {
+		return ERROR("failed to create vulkan device");
 	}
 
-	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-	glDebugMessageCallback(gl_debug_cb, NULL);
-
-	return true;
+	*stateRef = malloc(sizeof(mcState));
+	(**stateRef) = state;
+	return OK;
 }
 
-void mc_stop() {
-	if (state.context != 0) eglDestroyContext(state.display, state.context);
-	if (state.display != 0) eglTerminate(state.display);
-	if (state.device != NULL) gbm_device_destroy(state.device);
-	if (state.rendererFd != 0) close(state.rendererFd);
-}
+mcResult mc_state_destroy(mcStateH* state) {
+	if (state == NULL) return ERROR("`state` is NULL");
 
-void mc_set_debug_callback(mc_DebugCallback cb, void *arg) {
-	state.debug_cb = cb;
-	state.callbackArg = arg;
-}
+	vkDestroyDevice((*state)->device, NULL);
+	vkDestroyInstance((*state)->instance, NULL);
 
-void mc_default_debug_callback(mc_DebugLevel level, char *msg, void *arg) {
-	if (arg == NULL || level >= *(mc_DebugLevel *)arg)
-		printf("DEBUG (level %d): %s\n", level, msg);
+	free(*state);
+	*state = NULL;
+	return OK;
 }

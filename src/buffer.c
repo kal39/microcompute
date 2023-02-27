@@ -1,67 +1,109 @@
-#include "_microcompute.h"
+#include "microcompute_internal.h"
 
-mc_Buffer *mc_buffer_create(int binding, size_t size) {
-	mc_Buffer *buffer = malloc(sizeof(mc_Buffer));
-	glGenBuffers(1, &buffer->ssbo);
-	mc_buffer_rebind(buffer, binding);
-	mc_buffer_resize(buffer, size);
-	return buffer;
-}
+mcResult mc_buffer_create(mcBufferH* bufferRef, mcStateH state, uint64_t size) {
+	mcBuffer buffer;
+	buffer.device = state->device;
 
-void mc_buffer_destroy(mc_Buffer *buffer) {
-	if (buffer == NULL) return;
-	if (buffer->ssbo != 0) glDeleteBuffers(1, &buffer->ssbo);
-	free(buffer);
-}
+	VkBufferCreateInfo buffCreateInfo = (VkBufferCreateInfo){
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size = size,
+		.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.queueFamilyIndexCount = 1,
+		.pQueueFamilyIndices = &state->queueIndex,
+	};
 
-void mc_buffer_rebind(mc_Buffer *buffer, int binding) {
-	glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer->ssbo);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, buffer->ssbo);
-}
+	if (vkCreateBuffer(state->device, &buffCreateInfo, NULL, &buffer.buffer)
+		!= VK_SUCCESS)
+		return ERROR("failed to crate buffer");
 
-void mc_buffer_resize(mc_Buffer *buffer, size_t size) {
-	glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer->ssbo);
-	glBufferData(GL_SHADER_STORAGE_BUFFER, size, NULL, GL_DYNAMIC_COPY);
-}
+	VkMemoryRequirements memoryReqs;
+	vkGetBufferMemoryRequirements(state->device, buffer.buffer, &memoryReqs);
 
-size_t mc_buffer_get_size(mc_Buffer *buffer) {
-	GLint size;
-	glGetBufferParameteriv(GL_SHADER_STORAGE_BUFFER, GL_BUFFER_SIZE, &size);
-	return size;
-}
+	VkPhysicalDeviceMemoryProperties memoryProps;
+	vkGetPhysicalDeviceMemoryProperties(state->physicalDevice, &memoryProps);
 
-size_t mc_buffer_write(mc_Buffer *buffer, size_t off, size_t size, void *data) {
-	glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer->ssbo);
-
-	if (off + size > mc_buffer_get_size(buffer)) {
-		debug_msg(
-			mc_DebugLevel_MEDIUM,
-			"offset %d, size %d is larger than buffer size %d",
-			off,
-			size,
-			mc_buffer_get_size(buffer)
-		);
-		return 0;
+	uint32_t memTypeIndex = UINT32_MAX;
+	for (uint32_t i = 0; i < memoryProps.memoryTypeCount; i++) {
+		VkMemoryType memType = memoryProps.memoryTypes[i];
+		if (memType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			&& memType.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+			memTypeIndex = i;
 	}
 
-	glBufferSubData(GL_SHADER_STORAGE_BUFFER, off, size, data);
-	return size;
+	if (memTypeIndex == UINT32_MAX)
+		return ERROR("failed to find valid memory type");
+
+	VkMemoryAllocateInfo memAllocInfo = (VkMemoryAllocateInfo){
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = memoryReqs.size,
+		.memoryTypeIndex = memTypeIndex,
+	};
+
+	if (vkAllocateMemory(state->device, &memAllocInfo, NULL, &buffer.memory)
+		!= VK_SUCCESS)
+		return ERROR("failed to allocate memory");
+
+	if (vkBindBufferMemory(state->device, buffer.buffer, buffer.memory, 0)
+		!= VK_SUCCESS)
+		return ERROR("failed to bind buffer to memory");
+
+	*bufferRef = malloc(sizeof(mcBuffer));
+	(**bufferRef) = buffer;
+	return OK;
 }
 
-size_t mc_buffer_read(mc_Buffer *buffer, size_t off, size_t size, void *data) {
-	glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer->ssbo);
+mcResult mc_buffer_destroy(mcBufferH* buffer) {
+	if (buffer == NULL) return ERROR("`buffer` is NULL");
 
-	if (off + size > mc_buffer_get_size(buffer)) {
-		debug_msg(
-			mc_DebugLevel_MEDIUM,
-			"offset %d, size %d is larger than buffer size %d",
-			off,
-			size,
-			mc_buffer_get_size(buffer)
-		);
-		return 0;
-	}
+	vkDestroyBuffer((*buffer)->device, (*buffer)->buffer, NULL);
+	vkFreeMemory((*buffer)->device, (*buffer)->memory, NULL);
 
-	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, off, size, data);
-	return size;
+	free(*buffer);
+	*buffer = NULL;
+	return OK;
+}
+
+uint64_t mc_buffer_get_size(mcBufferH buffer) {
+	return buffer->size;
+}
+
+mcResult mc_buffer_write(
+	mcBufferH buffer,
+	uint64_t offset,
+	uint64_t size,
+	void* data
+) {
+	if (offset + size > buffer->size)
+		return ERROR("`offset` + `size` is larger than buffer size");
+
+	void* map;
+	if (vkMapMemory(buffer->device, buffer->memory, offset, size, 0, &map)
+		!= VK_SUCCESS)
+		return ERROR("failed to map memory");
+
+	memcpy(map, data, size);
+	vkUnmapMemory(buffer->device, buffer->memory);
+
+	return OK;
+}
+
+mcResult mc_buffer_read(
+	mcBufferH buffer,
+	uint64_t offset,
+	uint64_t size,
+	void* data
+) {
+	if (offset + size > buffer->size)
+		return ERROR("`offset` + `size` is larger than buffer size");
+
+	void* map;
+	if (vkMapMemory(buffer->device, buffer->memory, offset, size, 0, &map)
+		!= VK_SUCCESS)
+		return ERROR("failed to map memory");
+
+	memcpy(data, map, size);
+	vkUnmapMemory(buffer->device, buffer->memory);
+
+	return OK;
 }
